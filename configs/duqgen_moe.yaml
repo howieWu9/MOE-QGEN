@@ -1,0 +1,291 @@
+# HPC-ready configuration for running MOE-DUQGEN experiments remotely.
+# Update dataset paths, model download commands, and evaluation scripts according
+# to your DUQGEN checkout. All paths below assume the canonical DUQGEN layout.
+
+env:
+  workdir: /home/<user>/DUQGEN
+  setup:
+    - source ~/.bashrc
+    - conda activate duqgen
+  bootstrap:
+    # Install DUQGEN dependencies and cache generators/datasets once per run.
+    - pip install -r requirements.txt
+    - huggingface-cli download meta-llama/Llama-2-7b-chat-hf --local-dir {workdir}/models/llama2 --local-dir-use-symlinks False
+    - huggingface-cli download facebook/contriever-msmarco --local-dir {workdir}/models/contriever --local-dir-use-symlinks False
+    - huggingface-cli download colbert-ir/colbertv2.0 --local-dir {workdir}/models/colbertv2 --local-dir-use-symlinks False
+    - mkdir -p {workdir}/data/beir
+    - python -c "from beir import util; [util.download_and_unzip(ds, '{workdir}/data/beir') for ds in ['fiqa','nfcorpus','scifact','trec-covid']]"
+  submit:
+    binary: submit
+    env: duqgen
+    job_dir: runtime/moe_jobs
+    poll_interval: 60
+    extra_args:
+      - -p
+      - gpu-test
+
+# Datasets from the DUQGEN paper (BEIR + FiQA/NQ). Replace the paths with the
+# actual locations of the prepared collections and retrieval runs on the server.
+datasets:
+  - name: fiqa
+    collection_jsonl: /home/<user>/DUQGEN/data/beir/fiqa/collection.jsonl
+    collection_emb_pt: /home/<user>/DUQGEN/data/beir/fiqa/collection.pt
+    eval_run: /home/<user>/DUQGEN/runs/beir/fiqa
+  - name: nfcorpus
+    collection_jsonl: /home/<user>/DUQGEN/data/beir/nfcorpus/collection.jsonl
+    collection_emb_pt: /home/<user>/DUQGEN/data/beir/nfcorpus/collection.pt
+    eval_run: /home/<user>/DUQGEN/runs/beir/nfcorpus
+  - name: scifact
+    collection_jsonl: /home/<user>/DUQGEN/data/beir/scifact/collection.jsonl
+    collection_emb_pt: /home/<user>/DUQGEN/data/beir/scifact/collection.pt
+    eval_run: /home/<user>/DUQGEN/runs/beir/scifact
+  - name: trec-covid
+    collection_jsonl: /home/<user>/DUQGEN/data/beir/trec-covid/collection.jsonl
+    collection_emb_pt: /home/<user>/DUQGEN/data/beir/trec-covid/collection.pt
+    eval_run: /home/<user>/DUQGEN/runs/beir/trec-covid
+  - name: nq
+    collection_jsonl: /home/<user>/DUQGEN/data/duqgen/nq/collection.jsonl
+    collection_emb_pt: /home/<user>/DUQGEN/data/duqgen/nq/collection.pt
+    eval_run: /home/<user>/DUQGEN/runs/duqgen/nq
+
+# Experiments illustrating ablations A1–A5. Command templates run from
+# ``env.workdir`` on the remote host and inherit the DUQGEN layout.
+experiments:
+  - id: moe_full
+    description: Full MOE-DUQGEN++ pipeline
+    params:
+      target_num_q: 1000
+    generation:
+      command: >-
+        python scripts/moe_duqgen.py --collection_jsonl {collection_jsonl}
+        --collection_emb_pt {collection_emb_pt} --out_dir {output_dir}
+        --cache_dir cache --auto_k --align_to_k --use_candidate_best
+        --use_dedup --n_cands 5
+      measure_time: true
+      artifacts:
+        - {output_dir}/generated_queries.jsonl
+        - {output_dir}/weights_history.jsonl
+        - {output_dir}/cluster_stats.json
+    evaluation:
+      - command: >-
+          python scripts/evaluate_duqgen.py --dataset {name}
+          --queries {output_dir}/generated_queries.jsonl
+          --runs {eval_run} --output {output_dir}/metrics.json
+        metrics_file: {output_dir}/metrics.json
+  - id: ablation_a1_subsample
+    description: Auto-K selection using subsampling baseline
+    params:
+      target_num_q: 1000
+    generation:
+      command: >-
+        python scripts/moe_duqgen.py --collection_jsonl {collection_jsonl}
+        --collection_emb_pt {collection_emb_pt} --out_dir {output_dir}
+        --cache_dir cache --auto_k --align_to_k --use_candidate_best
+        --use_dedup --n_cands 5 --auto_k_subsample
+      measure_time: true
+      artifacts:
+        - {output_dir}/generated_queries.jsonl
+        - {output_dir}/weights_history.jsonl
+        - {output_dir}/cluster_stats.json
+    evaluation:
+      - command: >-
+          python scripts/evaluate_duqgen.py --dataset {name}
+          --queries {output_dir}/generated_queries.jsonl
+          --runs {eval_run} --output {output_dir}/metrics.json
+        metrics_file: {output_dir}/metrics.json
+  - id: ablation_a2_drop_neighbor
+    description: Remove neighbor density expert
+    params:
+      target_num_q: 1000
+      disable_expert: neighbor
+    generation:
+      command: >-
+        python scripts/moe_duqgen.py --collection_jsonl {collection_jsonl}
+        --collection_emb_pt {collection_emb_pt} --out_dir {output_dir}
+        --cache_dir cache --auto_k --align_to_k --use_candidate_best
+        --use_dedup --n_cands 5 --disable_expert {disable_expert}
+      measure_time: true
+      artifacts:
+        - {output_dir}/generated_queries.jsonl
+        - {output_dir}/weights_history.jsonl
+        - {output_dir}/cluster_stats.json
+    evaluation:
+      - command: >-
+          python scripts/evaluate_duqgen.py --dataset {name}
+          --queries {output_dir}/generated_queries.jsonl
+          --runs {eval_run} --output {output_dir}/metrics.json
+        metrics_file: {output_dir}/metrics.json
+  - id: ablation_a2_drop_tfidf
+    description: Remove TF-IDF salience expert
+    params:
+      target_num_q: 1000
+      disable_expert: tfidf
+    generation:
+      command: >-
+        python scripts/moe_duqgen.py --collection_jsonl {collection_jsonl}
+        --collection_emb_pt {collection_emb_pt} --out_dir {output_dir}
+        --cache_dir cache --auto_k --align_to_k --use_candidate_best
+        --use_dedup --n_cands 5 --disable_expert {disable_expert}
+      measure_time: true
+      artifacts:
+        - {output_dir}/generated_queries.jsonl
+        - {output_dir}/weights_history.jsonl
+        - {output_dir}/cluster_stats.json
+    evaluation:
+      - command: >-
+          python scripts/evaluate_duqgen.py --dataset {name}
+          --queries {output_dir}/generated_queries.jsonl
+          --runs {eval_run} --output {output_dir}/metrics.json
+        metrics_file: {output_dir}/metrics.json
+  - id: ablation_a2_drop_ni
+    description: Remove novelty/exclusivity expert
+    params:
+      target_num_q: 1000
+      disable_expert: novelty
+    generation:
+      command: >-
+        python scripts/moe_duqgen.py --collection_jsonl {collection_jsonl}
+        --collection_emb_pt {collection_emb_pt} --out_dir {output_dir}
+        --cache_dir cache --auto_k --align_to_k --use_candidate_best
+        --use_dedup --n_cands 5 --disable_expert {disable_expert}
+      measure_time: true
+      artifacts:
+        - {output_dir}/generated_queries.jsonl
+        - {output_dir}/weights_history.jsonl
+        - {output_dir}/cluster_stats.json
+    evaluation:
+      - command: >-
+          python scripts/evaluate_duqgen.py --dataset {name}
+          --queries {output_dir}/generated_queries.jsonl
+          --runs {eval_run} --output {output_dir}/metrics.json
+        metrics_file: {output_dir}/metrics.json
+  - id: ablation_a2_drop_cluster
+    description: Remove cluster distance expert
+    params:
+      target_num_q: 1000
+      disable_expert: cluster
+    generation:
+      command: >-
+        python scripts/moe_duqgen.py --collection_jsonl {collection_jsonl}
+        --collection_emb_pt {collection_emb_pt} --out_dir {output_dir}
+        --cache_dir cache --auto_k --align_to_k --use_candidate_best
+        --use_dedup --n_cands 5 --disable_expert {disable_expert}
+      measure_time: true
+      artifacts:
+        - {output_dir}/generated_queries.jsonl
+        - {output_dir}/weights_history.jsonl
+        - {output_dir}/cluster_stats.json
+    evaluation:
+      - command: >-
+          python scripts/evaluate_duqgen.py --dataset {name}
+          --queries {output_dir}/generated_queries.jsonl
+          --runs {eval_run} --output {output_dir}/metrics.json
+        metrics_file: {output_dir}/metrics.json
+  - id: ablation_a3_reward_r1
+    description: Enable only r1 reward
+    params:
+      target_num_q: 1000
+      reward_mask: r1
+    generation:
+      command: >-
+        python scripts/moe_duqgen.py --collection_jsonl {collection_jsonl}
+        --collection_emb_pt {collection_emb_pt} --out_dir {output_dir}
+        --cache_dir cache --auto_k --align_to_k --use_candidate_best
+        --use_dedup --n_cands 5 --reward_mask {reward_mask}
+      measure_time: true
+      artifacts:
+        - {output_dir}/generated_queries.jsonl
+        - {output_dir}/weights_history.jsonl
+        - {output_dir}/cluster_stats.json
+    evaluation:
+      - command: >-
+          python scripts/evaluate_duqgen.py --dataset {name}
+          --queries {output_dir}/generated_queries.jsonl
+          --runs {eval_run} --output {output_dir}/metrics.json
+        metrics_file: {output_dir}/metrics.json
+  - id: ablation_a3_reward_r12
+    description: Enable r1 + r2 rewards
+    params:
+      target_num_q: 1000
+      reward_mask: r1,r2
+    generation:
+      command: >-
+        python scripts/moe_duqgen.py --collection_jsonl {collection_jsonl}
+        --collection_emb_pt {collection_emb_pt} --out_dir {output_dir}
+        --cache_dir cache --auto_k --align_to_k --use_candidate_best
+        --use_dedup --n_cands 5 --reward_mask {reward_mask}
+      measure_time: true
+      artifacts:
+        - {output_dir}/generated_queries.jsonl
+        - {output_dir}/weights_history.jsonl
+        - {output_dir}/cluster_stats.json
+    evaluation:
+      - command: >-
+          python scripts/evaluate_duqgen.py --dataset {name}
+          --queries {output_dir}/generated_queries.jsonl
+          --runs {eval_run} --output {output_dir}/metrics.json
+        metrics_file: {output_dir}/metrics.json
+  - id: ablation_a3_reward_r123
+    description: Enable r1 + r2 + r3 rewards
+    params:
+      target_num_q: 1000
+      reward_mask: r1,r2,r3
+    generation:
+      command: >-
+        python scripts/moe_duqgen.py --collection_jsonl {collection_jsonl}
+        --collection_emb_pt {collection_emb_pt} --out_dir {output_dir}
+        --cache_dir cache --auto_k --align_to_k --use_candidate_best
+        --use_dedup --n_cands 5 --reward_mask {reward_mask}
+      measure_time: true
+      artifacts:
+        - {output_dir}/generated_queries.jsonl
+        - {output_dir}/weights_history.jsonl
+        - {output_dir}/cluster_stats.json
+    evaluation:
+      - command: >-
+          python scripts/evaluate_duqgen.py --dataset {name}
+          --queries {output_dir}/generated_queries.jsonl
+          --runs {eval_run} --output {output_dir}/metrics.json
+        metrics_file: {output_dir}/metrics.json
+  - id: ablation_a4_no_anticollapse
+    description: Disable weight floor + entropy regularisation
+    params:
+      target_num_q: 1000
+    generation:
+      command: >-
+        python scripts/moe_duqgen.py --collection_jsonl {collection_jsonl}
+        --collection_emb_pt {collection_emb_pt} --out_dir {output_dir}
+        --cache_dir cache --auto_k --align_to_k --use_candidate_best
+        --n_cands 5 --no_use_floor --no_use_entropy
+      measure_time: true
+      artifacts:
+        - {output_dir}/generated_queries.jsonl
+        - {output_dir}/weights_history.jsonl
+        - {output_dir}/cluster_stats.json
+    evaluation:
+      - command: >-
+          python scripts/evaluate_duqgen.py --dataset {name}
+          --queries {output_dir}/generated_queries.jsonl
+          --runs {eval_run} --output {output_dir}/metrics.json
+        metrics_file: {output_dir}/metrics.json
+  - id: ablation_a5_candidate_only
+    description: Candidate sampling without deduplication
+    params:
+      target_num_q: 1000
+    generation:
+      command: >-
+        python scripts/moe_duqgen.py --collection_jsonl {collection_jsonl}
+        --collection_emb_pt {collection_emb_pt} --out_dir {output_dir}
+        --cache_dir cache --auto_k --align_to_k --use_candidate_best
+        --n_cands 5 --no_use_dedup
+      measure_time: true
+      artifacts:
+        - {output_dir}/generated_queries.jsonl
+        - {output_dir}/weights_history.jsonl
+        - {output_dir}/cluster_stats.json
+    evaluation:
+      - command: >-
+          python scripts/evaluate_duqgen.py --dataset {name}
+          --queries {output_dir}/generated_queries.jsonl
+          --runs {eval_run} --output {output_dir}/metrics.json
+        metrics_file: {output_dir}/metrics.json
